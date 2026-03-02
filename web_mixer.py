@@ -1,4 +1,5 @@
 """
+替换web_mixer.py的内容为以下代码
 Web GUI 混音器 - 用于调整多声道混音的音量并实时试听
 支持多个音频文件的批量处理
 包含设置页面用于选择处理模式和目录
@@ -29,7 +30,14 @@ import numpy as np
 import soundfile as sf
 import tempfile
 import copy
-from tkinter import Tk, filedialog
+try:
+    from tkinter import Tk, filedialog
+except Exception:
+    Tk = None
+    filedialog = None
+
+import argparse
+import sys
 
 app = Flask(__name__, template_folder="web_templates", static_folder="web_static")
 
@@ -184,6 +192,11 @@ class MixerSession:
 
 
 mixer_session = MixerSession()
+
+# In headless environments (Colab/CI), avoid auto-opening the browser
+ALLOW_AUTO_BROWSER = not (
+    bool(os.environ.get("COLAB_GPU")) or bool(os.environ.get("CI")) or bool(os.environ.get("NO_BROWSER"))
+)
 
 
 def get_default_channel_config_51():
@@ -513,12 +526,14 @@ def separate_audio_internal(input_file, hardware_choice, mixer_session=None):
     model_config = (
         mixer_session.get_current_model() if mixer_session else MODEL_CONFIGS[0]
     )
-    config_path = f"bsroformer\\configs/{model_config['config_file']}"
-    model_path = f"bsroformer\\models/{model_config['model_file']}"
+    base_dir = os.path.dirname(__file__)
+    config_path = os.path.join(base_dir, "bsroformer", "configs", model_config["config_file"])
+    model_path = os.path.join(base_dir, "bsroformer", "models", model_config["model_file"])
 
+    python_exe = sys.executable or "python"
     args = [
-        ".\\Python\\python",
-        "bsroformer\\inference.py",
+        python_exe,
+        os.path.join(base_dir, "bsroformer", "inference.py"),
         "--model_type",
         "bs_roformer",
         "--config_path",
@@ -1123,7 +1138,7 @@ def shutdown():
 _server = None
 
 
-def start_web_mixer(input_dir, output_file, channel_count, port=5000):
+def start_web_mixer(input_dir, output_file, channel_count, port=5000, open_browser=True):
     """
     启动 Web 混音器（单文件模式 - 保持向后兼容）
 
@@ -1147,10 +1162,10 @@ def start_web_mixer(input_dir, output_file, channel_count, port=5000):
     audio_files = [
         {"name": audio_name, "input_dir": input_dir, "output_file": output_file}
     ]
-    return start_web_mixer_batch(audio_files, channel_count, port)
+    return start_web_mixer_batch(audio_files, channel_count, port, open_browser=open_browser)
 
 
-def start_web_mixer_batch(audio_files_info, channel_count, port=5000):
+def start_web_mixer_batch(audio_files_info, channel_count, port=5000, open_browser=True):
     """
     启动 Web 混音器（批量模式）
 
@@ -1208,7 +1223,8 @@ def start_web_mixer_batch(audio_files_info, channel_count, port=5000):
         time.sleep(1)
         webbrowser.open(f"http://localhost:{port}")
 
-    threading.Thread(target=open_browser, daemon=True).start()
+    if open_browser and ALLOW_AUTO_BROWSER:
+        threading.Thread(target=open_browser, daemon=True).start()
 
     def check_exit():
         import time
@@ -1270,7 +1286,8 @@ def start_web_mixer_setup(port=5000):
         time.sleep(1)
         webbrowser.open(f"http://localhost:{port}")
 
-    threading.Thread(target=open_browser, daemon=True).start()
+    if ALLOW_AUTO_BROWSER:
+        threading.Thread(target=open_browser, daemon=True).start()
 
     def check_exit():
         import time
@@ -1309,14 +1326,62 @@ def start_web_mixer_setup(port=5000):
 
 
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(description="Web Mixer - 可在 Colab 中以 CLI 方式运行或启动 Web UI")
+    parser.add_argument("--cli", action="store_true", help="以命令行模式运行（无需 Web 界面）")
+    parser.add_argument("--input_dir", type=str, help="分离后的音频输入目录（批量）")
+    parser.add_argument("--output_dir", type=str, help="导出目录（批量）")
+    parser.add_argument("--channel_count", type=int, choices=[5, 7], default=5, help="声道数（5 或 7），默认 5")
+    parser.add_argument("--hardware", type=str, default="1", help="硬件选择：1=GPU, others=CPU")
+    parser.add_argument("--model", type=str, default="0", help="模型 id")
+    parser.add_argument("--export_all", action="store_true", help="处理完成后自动导出所有文件")
+    parser.add_argument("--port", type=int, default=5000, help="Web 界面端口（如果启动 Web 模式）")
+    parser.add_argument("--setup", action="store_true", help="启动到设置模式（Web 模式）")
+    parser.add_argument("--no-browser", action="store_true", help="不要自动打开浏览器（在 Colab 中建议使用）")
 
-    if len(sys.argv) >= 4:
-        input_dir = sys.argv[1]
-        output_file = sys.argv[2]
-        channel_count = int(sys.argv[3])
-        start_web_mixer(input_dir, output_file, channel_count)
-    elif len(sys.argv) == 2 and sys.argv[1] == "--setup":
-        start_web_mixer_setup()
+    args = parser.parse_args()
+
+    if args.no_browser:
+        # 禁用自动打开浏览器
+        ALLOW_AUTO_BROWSER = False
+
+    if args.cli:
+        if not args.input_dir or not args.output_dir:
+            print("请指定 --input_dir 和 --output_dir 用于 CLI 批量处理。")
+            sys.exit(1)
+
+        cfg = {
+            "inputDir": args.input_dir,
+            "outputDir": args.output_dir,
+            "hardware": args.hardware,
+            "channel": "1" if args.channel_count == 5 else "2",
+            "model": args.model,
+        }
+
+        print(f"开始 CLI 处理: input={args.input_dir} output={args.output_dir} channels={args.channel_count}")
+        process_audio_files_thread(cfg)
+
+        print("处理状态:", mixer_session.processing_status)
+        print(mixer_session.processing_message)
+        if mixer_session.failed_files:
+            print("失败清单:")
+            for f in mixer_session.failed_files:
+                print(" - ", f)
+
+        if args.export_all:
+            print("开始导出所有文件...")
+            resp = export_all()
+            try:
+                data = resp.get_json()
+            except Exception:
+                data = None
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print("已完成处理（未自动导出）。如需导出请在 Web UI 中操作或使用 --export_all 参数。")
+
+        sys.exit(0)
+
+    # Web / setup 模式
+    if args.setup:
+        start_web_mixer_setup(port=args.port)
     else:
-        start_web_mixer_setup()
+        start_web_mixer_setup(port=args.port)
